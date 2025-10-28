@@ -1,145 +1,263 @@
-i  #!/usr/bin/env python3
+#!/usr/bin/env python3
 """
-Combine AIFF tags from two CD folders so Plex sees them as one album.
+Merge AIFF tags from an arbitrary list of sub‑folders so Plex sees a single album.
 
-Folder layout (example):
-    /music/Artist/Album/
-        cd1/
-            01 Track One.aiff
-            02 Track Two.aiff
-            ...
-        cd2/
-            01 Track Eleven.aiff
-            02 Track Twelve.aiff
-            ...
+Features
+--------
+* Flags for artist, date, venue, location.
+* `--dirs` – comma‑separated list of directories to aggregate (order matters).
+* `--tracklist` – optional text file (one line per track) that supplies exact titles.
+* Consecutive track numbers across all supplied folders.
+* Disc numbers (TPOS) correspond to the position of each folder in the list.
+* All tags are written using ID3 frames (mutagen).
 
-Usage:
-    python merge_aiff_tags.py /path/to/Album cd1 cd2 "Combined Album Title"
+Usage example
+-------------
+python merge_aiff_tags.py \
+    --root "/Users/me/Music/Live/GreatShow" \
+    --album "Great Show – Live" \
+    --artist "The Example Band" \
+    --date "2024-09-15" \
+    --venue "Red Rocks Amphitheatre" \
+    --location "Boulder, CO" \
+    --dirs cd1,cd2,bonus \
+    --tracklist "/Users/me/track_names.txt"
 """
 
+import argparse
 import sys
 from pathlib import Path
+from typing import List, Optional
+
 from mutagen.aiff import AIFF
-from mutagen.id3 import ID3, TIT2, TALB, TPE1, TRCK, TPOS, TYER, TCON, TDRC
+from mutagen.id3 import (
+    ID3,
+    TIT2,
+    TALB,
+    TPE1,
+    TRCK,
+    TPOS,
+    TDRC,
+    TXXX,
+    TCON,
+)
 
 
-def update_aiff_tags(
-    file_path: Path,
-    album_title: str,
+# ----------------------------------------------------------------------
+# Helper: write tags for a single AIFF file
+# ----------------------------------------------------------------------
+def write_tags(
+    aiff_path: Path,
+    album: str,
     artist: str,
-    year: str,
-    start_track: int,
+    date_iso: str,
+    venue: Optional[str],
+    location: Optional[str],
+    track_number: int,
     disc_number: int,
+    title: str,
 ) -> None:
-    """
-    Overwrite AIFF tags with unified album info.
+    """Overwrite (or create) ID3 tags on an AIFF file."""
+    audio = AIFF(aiff_path)
 
-    Parameters
-    ----------
-    file_path : Path
-        Path to the .aiff file.
-    album_title : str
-        Desired album name (the same for all tracks).
-    artist : str
-        Artist name.
-    year : str
-        Release year (as a four‑digit string).
-    start_track : int
-        The track number that this file should receive.
-    disc_number : int
-        Disc number (1 for cd1, 2 for cd2, …).
-    """
-    # Load the AIFF file – Mutagen treats AIFF metadata as ID3 frames.
-    audio = AIFF(file_path)
-
-    # Ensure there is an ID3 tag container; create if missing.
+    # Ensure an ID3 container exists
     if audio.tags is None:
         audio.add_tags()
-    id3 = audio.tags
+    id3: ID3 = audio.tags
 
-    # Set common fields.
+    # Core metadata
     id3[TPE1] = TPE1(encoding=3, text=artist)  # Artist
-    id3[TALB] = TALB(encoding=3, text=album_title)  # Album
-    id3[TDRC] = TDRC(encoding=3, text=year)  # Year / Date
-    id3[TCON] = TCON(encoding=3, text="")  # Genre (blank – you can fill)
-
-    # Per‑track fields.
-    id3[TIT2] = TIT2(
-        encoding=3, text=file_path.stem
-    )  # Title = filename (you can customize)
-    id3[TRCK] = TRCK(encoding=3, text=str(start_track))  # Track number
+    id3[TALB] = TALB(encoding=3, text=album)  # Album
+    id3[TDRC] = TDRC(encoding=3, text=date_iso)  # Full date
+    id3[TRCK] = TRCK(encoding=3, text=str(track_number))  # Track number (no total)
     id3[TPOS] = TPOS(encoding=3, text=str(disc_number))  # Disc number
 
-    # Write changes back to disk.
+    # Optional custom text frames
+    if venue:
+        id3.add(TXXX(encoding=3, desc="Venue", text=venue))
+    if location:
+        id3.add(TXXX(encoding=3, desc="Location", text=location))
+
+    # Title – either from supplied list or fallback to filename stem
+    id3[TIT2] = TIT2(encoding=3, text=title)
+
+    # Empty genre placeholder (you can expose a flag later if desired)
+    id3[TCON] = TCON(encoding=3, text="")
+
+    # Persist changes
     audio.save()
 
 
-def process_folder(
-    base_dir: Path,
-    subfolder: str,
-    album_title: str,
+# ----------------------------------------------------------------------
+# Load optional track‑list file (one line per track)
+# ----------------------------------------------------------------------
+def load_tracklist(path: Path) -> List[str]:
+    """Read a UTF‑8 text file, stripping trailing newlines."""
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+        # Remove empty lines but keep order
+        return [ln.strip() for ln in lines if ln.strip()]
+    except Exception as exc:
+        print(f"[ERROR] Could not read tracklist file '{path}': {exc}")
+        sys.exit(1)
+
+
+# ----------------------------------------------------------------------
+# Main processing routine
+# ----------------------------------------------------------------------
+def process_directories(
+    root: Path,
+    dirs: List[str],
+    album: str,
     artist: str,
-    year: str,
-    start_index: int,
-    disc_number: int,
-) -> int:
+    date_iso: str,
+    venue: Optional[str],
+    location: Optional[str],
+    track_titles: List[str],
+) -> None:
     """
-    Process all AIFF files in a given subfolder.
-
-    Returns the next track index after processing this folder.
+    Walk each supplied sub‑folder in order, rewrite tags, and keep a global
+    track counter so Plex sees a single, consecutive list.
     """
-    folder_path = base_dir / subfolder
-    if not folder_path.is_dir():
-        print(f"[WARN] Folder {folder_path} does not exist – skipping.")
-        return start_index
+    global_counter = 1  # overall track number across all folders
+    track_title_idx = 0  # pointer into the optional track‑list array
 
-    aiff_files = sorted(folder_path.glob("*.aiff"))
-    if not aiff_files:
-        print(f"[INFO] No AIFF files found in {folder_path}.")
-        return start_index
+    for disc_idx, subdir in enumerate(dirs, start=1):
+        folder = root / subdir
+        if not folder.is_dir():
+            print(f"[WARN] Skipping non‑existent folder: {folder}")
+            continue
 
-    print(f"[INFO] Updating {len(aiff_files)} files in {folder_path} ...")
-    for i, aiff_path in enumerate(aiff_files, start=start_index):
-        update_aiff_tags(
-            file_path=aiff_path,
-            album_title=album_title,
-            artist=artist,
-            year=year,
-            start_track=i,
-            disc_number=disc_number,
+        # Gather AIFF files sorted alphabetically (adjust if you need a different order)
+        aiff_files = sorted(folder.glob("*.aiff"))
+        if not aiff_files:
+            print(f"[INFO] No AIFF files found in {folder}")
+            continue
+
+        print(
+            f"[INFO] Processing {len(aiff_files)} files in {folder} (Disc {disc_idx})"
         )
-        print(f"  • {aiff_path.name} → track {i}")
+        for aiff_path in aiff_files:
+            # Determine title: use supplied list if available, otherwise filename stem
+            if track_title_idx < len(track_titles):
+                title = track_titles[track_title_idx]
+                track_title_idx += 1
+            else:
+                title = aiff_path.stem  # fallback
 
-    return start_index + len(aiff_files)
+            write_tags(
+                aiff_path=aiff_path,
+                album=album,
+                artist=artist,
+                date_iso=date_iso,
+                venue=venue,
+                location=location,
+                track_number=global_counter,
+                disc_number=disc_idx,
+                title=title,
+            )
+            print(f"  • {aiff_path.name} → Track {global_counter}, Title: {title}")
+            global_counter += 1
+
+
+# ----------------------------------------------------------------------
+# Argument parsing
+# ----------------------------------------------------------------------
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        description="Aggregate multiple AIFF directories into a single Plex album "
+        "by rewriting ID3 tags (artist, date, venue, location, titles, etc.)."
+    )
+    p.add_argument(
+        "--root",
+        required=True,
+        help="Root directory that contains the sub‑folders to aggregate.",
+    )
+    p.add_argument(
+        "--album",
+        required=True,
+        help="Unified album title that Plex will display.",
+    )
+    p.add_argument(
+        "--artist",
+        required=True,
+        help="Artist name to write into every file.",
+    )
+    p.add_argument(
+        "--date",
+        required=True,
+        help="Full ISO date (YYYY‑MM‑DD) for the recording/release.",
+    )
+    p.add_argument(
+        "--venue",
+        default=None,
+        help="Venue name (optional).",
+    )
+    p.add_argument(
+        "--location",
+        default=None,
+        help="Location (city, state, country) – optional.",
+    )
+    p.add_argument(
+        "--dirs",
+        required=True,
+        help=(
+            "Comma‑separated list of sub‑folder names to merge, in the order you "
+            "want them treated as discs (e.g. 'cd1,cd2,bonus')."
+        ),
+    )
+    p.add_argument(
+        "--tracklist",
+        default=None,
+        help=(
+            "Path to a plain‑text file containing one track title per line. "
+            "If fewer titles than total tracks are supplied, remaining tracks fall "
+            "back to their original filenames."
+        ),
+    )
+    return p
 
 
 def main() -> None:
-    if len(sys.argv) != 5:
-        print(__doc__)
+    parser = build_parser()
+    args = parser.parse_args()
+
+    root_path = Path(args.root).expanduser().resolve()
+    if not root_path.is_dir():
+        print(f"[ERROR] Root path does not exist or is not a directory: {root_path}")
         sys.exit(1)
 
-    root_dir = Path(sys.argv[1]).expanduser().resolve()
-    cd_folders = [sys.argv[2], sys.argv[3]]  # e.g. ["cd1", "cd2"]
-    combined_album = sys.argv[4]  # Desired album title
+    # Parse the comma‑separated list of directories
+    dir_list = [d.strip() for d in args.dirs.split(",") if d.strip()]
+    if not dir_list:
+        print("[ERROR] No valid directories supplied via --dirs")
+        sys.exit(1)
 
-    # You can hard‑code these or pull them from an existing file/metadata source.
-    # Here we simply guess from the parent directory name.
-    artist = root_dir.parent.name or "Unknown Artist"
-    year = "2024"  # Change as needed
+    # Load optional track‑list file
+    track_titles: List[str] = []
+    if args.tracklist:
+        tracklist_path = Path(args.tracklist).expanduser().resolve()
+        if not tracklist_path.is_file():
+            print(f"[ERROR] Tracklist file not found: {tracklist_path}")
+            sys.exit(1)
+        track_titles = load_tracklist(tracklist_path)
 
-    next_track = 1
-    for idx, cd in enumerate(cd_folders, start=1):
-        next_track = process_folder(
-            base_dir=root_dir,
-            subfolder=cd,
-            album_title=combined_album,
-            artist=artist,
-            year=year,
-            start_index=next_track,
-            disc_number=idx,
-        )
+    # Run the processing loop
+    process_directories(
+        root=root_path,
+        dirs=dir_list,
+        album=args.album,
+        artist=args.artist,
+        date_iso=args.date,
+        venue=args.venue,
+        location=args.location,
+        track_titles=track_titles,
+    )
 
-    print("\n✅ Tag update complete! Plex should now see a single album.")
+    print(
+        "\n✅ All tags have been rewritten. Refresh Plex (or trigger a manual scan) "
+        "to see the single combined album with consecutive tracks."
+    )
 
 
 if __name__ == "__main__":
