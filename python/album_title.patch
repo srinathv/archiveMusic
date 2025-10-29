@@ -1,0 +1,282 @@
+diff --git a/merge_aiff_tags.py b/merge_aiff_tags.py
+index 5b2c1e7..d9f4a33 100755
+--- a/merge_aiff_tags.py
++++ b/merge_aiff_tags.py
+@@
+-from pathlib import Path
+-from typing import List, Optional, Callable
++from pathlib import Path
++from typing import List, Optional, Callable
+ 
+ from mutagen.aiff import AIFF
+ from mutagen.id3 import (
+@@
+-# ----------------------------------------------------------------------
+-# Helpers for sorting
+-# ----------------------------------------------------------------------
+-def _numeric_key(p: Path) -> tuple:
+-    """Sort by leading integer (if any) then alphabetically."""
+-    m = re.match(r"^\D*(\d+)", p.stem)
+-    if m:
+-        return (int(m.group(1)), p.name.lower())
+-    else:
+-        return (float("inf"), p.name.lower())
+-
+-
+-def _alpha_key(p: Path) -> str:
+-    return p.name.lower()
+-
+-
+-SORTERS = {"numeric": _numeric_key, "alpha": _alpha_key}
+-
+-# ----------------------------------------------------------------------
+-# Build an album title from the supplied pieces when the user omits --album
+-# ----------------------------------------------------------------------
+-def build_album_title(
+-    artist: str,
+-    date_iso: str,
+-    venue: Optional[str],
+-    location: Optional[str],
+-) -> str:
+-    parts = [artist, date_iso]
+-    if venue:
+-        parts.append(venue)
+-    if location:
+-        parts.append(location)
+-    # Join with an en‑dash surrounded by spaces for readability
+-    return " – ".join(parts)
+-
+-# ----------------------------------------------------------------------
+-# Write tags for a single AIFF file
+-# ----------------------------------------------------------------------
++# ----------------------------------------------------------------------
++# Helpers for sorting
++# ----------------------------------------------------------------------
++def _numeric_key(p: Path) -> tuple:
++    """Sort by leading integer (if any) then alphabetically."""
++    m = re.match(r"^\D*(\d+)", p.stem)
++    if m:
++        return (int(m.group(1)), p.name.lower())
++    else:
++        return (float("inf"), p.name.lower())
++
++
++def _alpha_key(p: Path) -> str:
++    return p.name.lower()
++
++
++SORTERS = {"numeric": _numeric_key, "alpha": _alpha_key}
++
++# ----------------------------------------------------------------------
++# Build an album title from the supplied pieces when the user omits --album
++# ----------------------------------------------------------------------
++def build_album_title(
++    artist: str,
++    date_iso: str,
++    venue: Optional[str],
++    location: Optional[str],
++) -> str:
++    """
++    Construct a human‑readable album title from the metadata that is already
++    required for tagging.  Missing components are simply omitted so we never
++    end up with stray separators.
++    """
++    parts = [artist, date_iso]
++    if venue:
++        parts.append(venue)
++    if location:
++        parts.append(location)
++    # Join with an en‑dash surrounded by spaces for readability
++    return " – ".join(parts)
++
++# ----------------------------------------------------------------------
++# Write tags for a single AIFF file
++# ----------------------------------------------------------------------
+@@
+-    # ------------------------------------------------------------------
+-    # 1️⃣ Gather *all* AIFF files first so we know the total count.
+-    # ------------------------------------------------------------------
++    # ------------------------------------------------------------------
++    # 1️⃣ Gather *all* AIFF files first so we know the total count.
++    # ------------------------------------------------------------------
+@@
+-    # ------------------------------------------------------------------
+-    # 2️⃣ Load cover art (if supplied) once.
+-    # ------------------------------------------------------------------
++    # ------------------------------------------------------------------
++    # 2️⃣ Load cover art (if supplied) once.
++    # ------------------------------------------------------------------
+@@
+-    # ------------------------------------------------------------------
+-    # 3️⃣ Iterate over the collected list, assign numbers, write tags.
+-    # ------------------------------------------------------------------
++    # ------------------------------------------------------------------
++    # 3️⃣ Iterate over the collected list, assign numbers, write tags.
++    # ------------------------------------------------------------------
+@@
+-    # Argument parsing
+-    # ----------------------------------------------------------------------
+-def build_parser() -> argparse.ArgumentParser:
+-    p = argparse.ArgumentParser(
+-        description=(
+-            "Aggregate multiple AIFF directories into a single Plex album. "
+-            "If --album is NOT supplied, the script builds an album title from "
+-            "artist, date, venue, and location (e.g. \"The Example Band – 2024-09-15 – "
+-            "Red Rocks Amphitheatre – Boulder, CO\")."
+-        )
+-    )
+-    p.add_argument("--root", required=True, help="Root directory containing the sub‑folders.")
+-    p.add_argument(
+-        "--album",
+-        required=False,
+-        default=None,
+-        help=(
+-            "Unified album title. If omitted, the script creates one from "
+-            "artist, date, venue, and location."
+-        ),
+-    )
+-    p.add_argument("--artist", required=True, help="Artist name.")
+-    p.add_argument("--date", required=True, help="Full ISO date (YYYY‑MM‑DD).")
+-    p.add_argument("--venue", default=None, help="Venue name (optional).")
+-    p.add_argument("--location", default=None, help="Location (city/state/country) (optional).")
+-    p.add_argument("--genre", default=None, help="Genre string (optional).")
+-    p.add_argument(
+-        "--cover",
+-        default=None,
+-        help="Path to a JPEG/PNG image to embed as album artwork (optional).",
+-    )
+-    p.add_argument(
+-        "--dirs",
+-        required=True,
+-        help=(
+-            "Comma‑separated list of sub‑folder names to merge, in order "
+-            "(e.g. cd1,cd2,bonus). The order determines disc numbers."
+-        ),
+-    )
+-    p.add_argument(
+-        "--tracklist",
+-        default=None,
+-        help="Plain‑text file with one track title per line (optional).",
+-    )
+-    p.add_argument(
+-        "--sort",
+-        choices=["alpha", "numeric"],
+-        default="alpha",
+-        help="How to sort files inside each folder (default: alpha).",
+-    )
+-    return p
++    # Argument parsing
++    # ----------------------------------------------------------------------
++def build_parser() -> argparse.ArgumentParser:
++    p = argparse.ArgumentParser(
++        description=(
++            "Aggregate multiple AIFF directories into a single Plex album. "
++            "If --album is omitted, the script builds an album title from "
++            "artist, date, venue, and location."
++        )
++    )
++    p.add_argument("--root", required=True, help="Root directory containing the sub‑folders.")
++    p.add_argument(
++        "--album",
++        required=False,
++        default=None,
++        help=(
++            "Unified album title. If omitted, the script creates one from "
++            "artist, date, venue, and location."
++        ),
++    )
++    p.add_argument("--artist", required=True, help="Artist name.")
++    p.add_argument("--date", required=True, help="Full ISO date (YYYY‑MM‑DD).")
++    p.add_argument("--venue", default=None, help="Venue name (optional).")
++    p.add_argument("--location", default=None, help="Location (city/state/country) (optional).")
++    p.add_argument("--genre", default=None, help="Genre string (optional).")
++    p.add_argument(
++        "--cover",
++        default=None,
++        help="Path to a JPEG/PNG image to embed as album artwork (optional).",
++    )
++    p.add_argument(
++        "--dirs",
++        required=True,
++        help=(
++            "Comma‑separated list of sub‑folder names to merge, in order "
++            "(e.g. cd1,cd2,bonus). The order determines disc numbers."
++        ),
++    )
++    p.add_argument(
++        "--tracklist",
++        default=None,
++        help="Plain‑text file with one track title per line (optional).",
++    )
++    p.add_argument(
++        "--sort",
++        choices=["alpha", "numeric"],
++        default="alpha",
++        help="How to sort files inside each folder (default: alpha).",
++    )
++    return p
+@@
+-    # ------------------------------------------------------------------
+-    # Determine the final album title (user‑supplied or auto‑generated)
+-    # ------------------------------------------------------------------
+-    final_album = (
+-        args.album
+-        if args.album
+-        else build_album_title(
+-            artist=args.artist,
+-            date_iso=args.date,
+-            venue=args.venue,
+-            location=args.location,
+-        )
+-    )
+-    print(f"[INFO] Using album title: {final_album}")
+-
+-    # ------------------------------------------------------------------
+-    # Run the processing pipeline
+-    # ------------------------------------------------------------------
+-    process_directories(
+-        root=root_path,
+-        dirs=dir_list,
+-        album=final_album,
+-        artist=args.artist,
+-        date_iso=args.date,
+-        venue=args.venue,
+-        location=args.location,
+-        genre=args.genre,
+-        cover_path=cover_path,
+-        sort_mode=args.sort,
+-        track_titles=track_titles,
+-    )
++    # ------------------------------------------------------------------
++    # Determine the final album title (user‑supplied or auto‑generated)
++    # ------------------------------------------------------------------
++    final_album = (
++        args.album
++        if args.album
++        else build_album_title(
++            artist=args.artist,
++            date_iso=args.date,
++            venue=args.venue,
++            location=args.location,
++        )
++    )
++    print(f"[INFO] Using album title: {final_album}")
++
++    # ------------------------------------------------------------------
++    # Run the processing pipeline
++    # ------------------------------------------------------------------
++    process_directories(
++        root=root_path,
++        dirs=dir_list,
++        album=final_album,
++        artist=args.artist,
++        date_iso=args.date,
++        venue=args.venue,
++        location=args.location,
++        genre=args.genre,
++        cover_path=cover_path,
++        sort_mode=args.sort,
++        track_titles=track_titles,
++    )
+*** End of File ***
+EOF
