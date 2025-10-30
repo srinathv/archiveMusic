@@ -1,29 +1,19 @@
 #!/usr/bin/env python3
 """
-Aggregate multiple AIFF sub‑folders into a single Plex album.
+Aggregate multiple AIFF directories into a single Plex album.
 
-Additional features compared to the basic version:
-  • --cover   – embed JPEG/PNG artwork (APIC frame)
-  • --genre   – write a genre string (TCON)
-  • Total‑track count in TRCK (e.g. 5/27)
-  • --sort    – choose file ordering inside each folder:
-        alpha   – alphabetical (default)
-        numeric – numeric prefix aware (01‑track, 2‑song, …)
+New feature:
+    • If --album is NOT supplied, the script builds an album title from
+      artist, date, venue, and location (e.g. "The Example Band – 2024-09-15 –
+      Red Rocks Amphitheatre – Boulder, CO").
 
-Usage example
--------------
-python merge_aiff_tags.py \
-    --root "/Users/me/Music/Live/RedRocksShow" \
-    --album "Red Rocks – Live Show" \
-    --artist "The Example Band" \
-    --date "2024-09-15" \
-    --venue "Red Rocks Amphitheatre" \
-    --location "Boulder, CO" \
-    --genre "Live" \
-    --cover "/Users/me/Pictures/redrocks.jpg" \
-    --dirs cd1,cd2,bonus \
-    --tracklist "/Users/me/track_names.txt" \
-    --sort numeric
+Other capabilities (unchanged):
+    • Optional cover art (APIC)
+    • Optional genre (TCON)
+    • Total‑track count in TRCK (e.g. 5/27)
+    • Custom sorting inside each folder (alpha / numeric)
+    • Comma‑separated list of directories (--dirs) → disc numbers
+    • Optional track‑list file (one title per line)
 """
 
 import argparse
@@ -51,15 +41,11 @@ from mutagen.id3 import (
 # Helpers for sorting
 # ----------------------------------------------------------------------
 def _numeric_key(p: Path) -> tuple:
-    """
-    Return a tuple that sorts by leading integer (if any) then alphabetically.
-    Files without a leading integer get (inf, name) so they appear after numbered ones.
-    """
+    """Sort by leading integer (if any) then alphabetically."""
     m = re.match(r"^\D*(\d+)", p.stem)
     if m:
         return (int(m.group(1)), p.name.lower())
     else:
-        # Use a large number so unnumbered files sort after numbered ones
         return (float("inf"), p.name.lower())
 
 
@@ -67,10 +53,25 @@ def _alpha_key(p: Path) -> str:
     return p.name.lower()
 
 
-SORTERS = {
-    "numeric": _numeric_key,
-    "alpha": _alpha_key,
-}
+SORTERS = {"numeric": _numeric_key, "alpha": _alpha_key}
+
+
+# ----------------------------------------------------------------------
+# Build an album title from the supplied pieces when the user omits --album
+# ----------------------------------------------------------------------
+def build_album_title(
+    artist: str,
+    date_iso: str,
+    venue: Optional[str],
+    location: Optional[str],
+) -> str:
+    parts = [artist, date_iso]
+    if venue:
+        parts.append(venue)
+    if location:
+        parts.append(location)
+    # Join with an en‑dash surrounded by spaces for readability
+    return " – ".join(parts)
 
 
 # ----------------------------------------------------------------------
@@ -91,22 +92,17 @@ def write_tags(
     cover_bytes: Optional[bytes],
     cover_mime: Optional[str],
 ) -> None:
-    """Overwrite (or create) ID3 tags on an AIFF file."""
-
     audio = AIFF(aiff_path)
 
-    # Ensure an ID3 container exists
     if audio.tags is None:
         audio.add_tags()
     id3: ID3 = audio.tags
 
-    # Core fields
+    # Core metadata
     id3[TPE1] = TPE1(encoding=3, text=artist)  # Artist
     id3[TALB] = TALB(encoding=3, text=album)  # Album
     id3[TDRC] = TDRC(encoding=3, text=date_iso)  # Full date
-    id3[TRCK] = TRCK(
-        encoding=3, text=f"{track_number}/{total_tracks}"
-    )  # Track (with total)
+    id3[TRCK] = TRCK(encoding=3, text=f"{track_number}/{total_tracks}")  # Track/total
     id3[TPOS] = TPOS(encoding=3, text=str(disc_number))  # Disc number
 
     # Optional custom text frames
@@ -123,13 +119,11 @@ def write_tags(
 
     # Cover art (APIC) – replace any existing picture
     if cover_bytes and cover_mime:
-        # Remove any existing APIC frames first
         id3.delall("APIC")
         id3.add(
             APIC(encoding=3, mime=cover_mime, type=3, desc="Cover", data=cover_bytes)
         )
 
-    # Persist changes
     audio.save()
 
 
@@ -196,7 +190,6 @@ def process_directories(
             print(f"[ERROR] Cover image not found: {cover_path}")
             sys.exit(1)
         cover_bytes = cover_path.read_bytes()
-        # Very simple MIME detection – rely on file extension
         ext = cover_path.suffix.lower()
         if ext in {".jpg", ".jpeg"}:
             cover_mime = "image/jpeg"
@@ -236,7 +229,8 @@ def process_directories(
             cover_mime=cover_mime,
         )
         print(
-            f"  • {file_path.name} → Track {global_counter}/{total_tracks}, Disc {disc_number}, Title: {title}"
+            f"  • {file_path.name} → Track {global_counter}/{total_tracks}, "
+            f"Disc {disc_number}, Title: {title}"
         )
         global_counter += 1
 
@@ -246,13 +240,24 @@ def process_directories(
 # ----------------------------------------------------------------------
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        description="Aggregate multiple AIFF directories into a single Plex album, "
-        "with optional cover art, genre, total‑track count, and custom sorting."
+        description=(
+            "Aggregate multiple AIFF directories into a single Plex album. "
+            "If --album is omitted, the title is built from artist, date, venue, "
+            "and location."
+        )
     )
     p.add_argument(
         "--root", required=True, help="Root directory containing the sub‑folders."
     )
-    p.add_argument("--album", required=True, help="Unified album title.")
+    p.add_argument(
+        "--album",
+        required=False,
+        default=None,
+        help=(
+            "Unified album title. If omitted, the script creates one from "
+            "artist, date, venue, and location."
+        ),
+    )
     p.add_argument("--artist", required=True, help="Artist name.")
     p.add_argument("--date", required=True, help="Full ISO date (YYYY‑MM‑DD).")
     p.add_argument("--venue", default=None, help="Venue name (optional).")
@@ -268,7 +273,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--dirs",
         required=True,
-        help="Comma‑separated list of sub‑folder names to merge, in order (e.g. cd1,cd2,bonus).",
+        help=(
+            "Comma‑separated list of sub‑folder names to merge, in order "
+            "(e.g. cd1,cd2,bonus). The order determines disc numbers."
+        ),
     )
     p.add_argument(
         "--tracklist",
@@ -312,11 +320,28 @@ def main() -> None:
     if args.cover:
         cover_path = Path(args.cover).expanduser().resolve()
 
+    # ------------------------------------------------------------------
+    # Determine the final album title (user‑supplied or auto‑generated)
+    # ------------------------------------------------------------------
+    final_album = (
+        args.album
+        if args.album
+        else build_album_title(
+            artist=args.artist,
+            date_iso=args.date,
+            venue=args.venue,
+            location=args.location,
+        )
+    )
+    print(f"[INFO] Using album title: {final_album}")
+
+    # ------------------------------------------------------------------
     # Run the processing pipeline
+    # ------------------------------------------------------------------
     process_directories(
         root=root_path,
         dirs=dir_list,
-        album=args.album,
+        album=final_album,
         artist=args.artist,
         date_iso=args.date,
         venue=args.venue,
